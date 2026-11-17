@@ -28,6 +28,7 @@
 #include <img4/img4.h>
 #include <fuse/fuse.h>
 #include <recfg/recfg_soc.h>
+#include <sep/nvram_art.h>
 
 #define IRQ_T8015_SEP_INBOX_NOT_EMPTY 0x79
 // #define SEP_DEBUG
@@ -275,19 +276,53 @@ void seprom_ping(void) {
 }
 static int parse_sepfw(Img4 *img4, uint32_t *imglen)
 {
+    if(imglen) *imglen = 0;
+    iprintf("[sepfw] buffer=%p size=0x%llx\n", gSEPFW, (unsigned long long)gSEPFWLen);
+    if(!img4 || !gSEPFW)
+    {
+        iprintf("[sepfw] Invalid output or missing firmware buffer; check sep_setup and /chosen/memory-map/SEPFW\n");
+        return DR_ParamErr;
+    }
+    if(gSEPFWLen > UINT32_MAX)
+    {
+        iprintf("[sepfw] Firmware length exceeds the 32-bit DER size limit\n");
+        return DR_BufOverflow;
+    }
+
     uint32_t len = (uint32_t)gSEPFWLen;
     DERByte* data = gSEPFW;
+    if(len)
+    {
+        iprintf("[sepfw] First firmware bytes (up to 64):\n");
+        hexdump(data, len < 64 ? len : 64);
+    }
+    if(len < 2)
+    {
+        iprintf("[sepfw] Firmware is too short for a DER header\n");
+        return DR_DecodeError;
+    }
+
     uint32_t type = 0;
     DERItem tmp = { .data = data, .length = len };
     DERDecodedInfo decoded;
     int rv = DERDecodeItem(&tmp, &decoded);
+    iprintf("[sepfw] DERDecodeItem: rv=%d (0x%x)\n", rv, (unsigned)rv);
     if (0 != rv) return rv;
     len = decoded.content.length + (decoded.content.data - data);
+    iprintf("[sepfw] DER tag=0x%llx content=0x%x total=0x%x\n",
+            (unsigned long long)decoded.tag, decoded.content.length, len);
     rv = Img4DecodeInit(data, len, img4);
+    iprintf("[sepfw] Img4DecodeInit: rv=%d (0x%x)\n", rv, (unsigned)rv);
     if (0 != rv) return rv;
     rv = Img4DecodeGetPayloadType(img4, &type);
+    iprintf("[sepfw] Img4DecodeGetPayloadType: rv=%d (0x%x) type=0x%08x\n",
+            rv, (unsigned)rv, type);
     if (0 != rv) return rv;
-    if (type != 0x73657069) return 0x73657069; // sepi
+    if (type != 0x73657069)
+    {
+        iprintf("[sepfw] Unexpected payload type; expected sepi (0x73657069)\n");
+        return 0x73657069; // sepi
+    }
 
     if(imglen) *imglen = len;
     return 0;
@@ -896,10 +931,25 @@ void seprom_load_art(void* art, char mode) {
 }
 void seprom_artload(void) {
     if (!loader_xfer_recv_count) {
-        iprintf("please upload an ART before issuing this command\n");
+        iprintf("Using art read from device tree\n");
+        nvram_art_t art;
+        int rc = nvram_art_load(&art);
+        if (rc != NVRAM_ART_OK) {
+            printf("nvram_art_load failed: %d\n", rc);
+            return;
+        }
+        printf("NVRAM encoded: PA=0x%llx, len=0x%zx\n",
+               (unsigned long long)art.encoded_pa, art.encoded_len);
+        printf("Decoded ART: VA=%p, PA=0x%llx, len=0x%zx\n", (void *)art.art_va,
+               (unsigned long long)art.art_pa, art.art_len);
+        seprom_load_art((void*)art.art_pa, 0);
+        nvram_art_release(&art);
+        return;
+    } else {
+        iprintf("Using art read from USB\n");
+        seprom_load_art((void*)loader_xfer_recv_data, 0);
         return;
     }
-    seprom_load_art((void*)loader_xfer_recv_data, 0);
 }
 void seprom_resume(void) {
     disable_interrupts();
