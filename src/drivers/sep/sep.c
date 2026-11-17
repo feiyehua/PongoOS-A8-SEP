@@ -1209,6 +1209,11 @@ void sep_setup(void)
     if (socnum == 0x8015) {
         mailboxregs64 = (volatile struct mailbox_registers64 *)(sep_reg_u + 0x8100);
         is_sep64 = 1;
+    } else if (socnum == 0x7000) {
+        mailboxregs32 = (volatile struct mailbox_registers32 *)(sep_reg_u + 0x1000);
+        // iprintf("Running on A8 processor\n");
+        // iprintf("mailboxregs32 address %x\n", mailboxregs32);
+        is_sep64 = 0;
     } else {
         mailboxregs32 = (volatile struct mailbox_registers32 *)(sep_reg_u + 0x4000);
         is_sep64 = 0;
