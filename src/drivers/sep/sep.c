@@ -89,6 +89,37 @@ static int is_sep64 = 0;
 struct event sep_msg_event, sep_rand_event, sep_boot_event, sep_load_event, sep_panic_event, sep_done_tz0_event, sep_done_integrity_tree_event;
 volatile uint32_t rnd_val;
 volatile uint32_t sep_has_loaded, sep_has_booted, sep_has_panicked, sep_has_done_tz0, seprom_has_left_to_sepos;
+
+static const uint8_t img4_data[] = {
+    // Outer SEQUENCE: IMG4
+    0x30, 0x3e,
+    0x16, 0x04, 'I', 'M', 'G', '4',
+
+    // Inner SEQUENCE: IM4P
+    0x30, 0x36,
+    0x16, 0x04, 'I', 'M', '4', 'P',
+    0x16, 0x04, 's', 'e', 'p', 'i',
+    0x16, 0x06, 'i', 'P', 'h', 'o', 'n', 'e',
+
+    // OCTET STRING: 32 bytes
+    0x04, 0x20,
+
+    // ARM32: ldr pc, [pc, #-4]
+    0x04, 0xf0, 0x1f, 0xe5,
+
+    // "AAAA"
+    0x41, 0x41, 0x41, 0x41,
+
+    // 24 zero bytes
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00
+};
+
+static const size_t img4_size = sizeof(img4_data);
 void (*sepfw_kpf_hook)(void* sepfw_bytes, size_t sepfw_size);
 void sepfw_kpf(void* sepfw_bytes, size_t sepfw_size) {
     uint32_t* insn_stream = sepfw_bytes;
@@ -416,6 +447,15 @@ void seprom_fwload(void) {
     // We clear this here to account for "sep auto" followed by manual invocation
     is_waiting_to_boot = 0;
     seprom_load_sepos(gSEPFW, 0);
+}
+void seprom_fwload_async(void * firmware) {
+    // We clear this here to account for "sep auto" followed by manual invocation
+    is_waiting_to_boot = 0;
+    if(socnum == 0x8015) {
+        recfg_soc_lock();
+    }
+    disable_interrupts();
+    seprom_execute_opcode(6, 0, vatophys((uint64_t) (firmware == NULL ? gSEPFW : firmware)) >> 12);
 }
 asm(".text\n"
     ".align 2\n"
@@ -1185,6 +1225,79 @@ void sep_auto(const char* cmd, char* args)
     }
 }
 
+// Observe how SEPROM performs SEPOS startup
+void sep_observe(const char *cmd, char *args)
+{
+    // arg 0 = 1 to use fake img4
+    // arg 1 = 1 to disable key pinning,
+    char* arg1 = command_tokenize(args, 0x1ff - (args - cmd));
+    int use_fake_img4 = atoi(args);
+    int disable_key_pinning = atoi(arg1);
+    iprintf("use_fake_img4 = %d, disable_key_pinning = %d\n", use_fake_img4,
+            disable_key_pinning);
+    void * fake_img4 = NULL;
+
+    seprom_ping();
+    uint64_t tz0_base, tz0_size;
+    if (!tz_get(0, &tz0_base, &tz0_size)) {
+        panic("Failed to get TZ0 bounds");
+    }
+    map_range(0xc00000000, tz0_base, tz0_size, 3, 2, true);
+    tz0_base = 0xc00000000;
+    iprintf("start to boot tz0\n");
+    seprom_boot_tz0_async();
+
+    // key pinning hax
+    if (!disable_key_pinning) {
+        for (int x = 0; x<10000; x++) {
+            *(volatile uint64_t*)((char *)tz0_base+0xBFF000+0x18) = 0;
+            *(volatile uint64_t*)((char *)tz0_base+0xBFF000+0x20) = 0;
+            *(volatile uint64_t*)((char *)tz0_base+0xBFF000+0x28) = 0;
+            *(volatile uint64_t*)((char *)tz0_base+0xBFF000+0x48) = 0;
+            *(volatile uint64_t*)((char *)tz0_base+0xBFF000+0x50) = 0;
+            *(volatile uint64_t*)((char *)tz0_base+0xBFF000+0x58) = 0;
+        }   
+    }
+    iprintf("finished writing key pinning area\n");
+    // event_wait_asserted(&sep_done_tz0_event);
+    seprom_ping();
+    seprom_artload();
+    iprintf("loaded art\n");
+    volatile uint64_t *watchdog;
+    watchdog = (volatile uint64_t *)tz0_base + 4; // offset 0x20
+    uint64_t observed_value[10] = {};
+    int changed_tick[10] = {};
+    int number_of_change = 0;
+    observed_value[number_of_change] = *watchdog;
+    changed_tick[number_of_change] = 0;
+    // Kick off SEPOS loading
+    if (use_fake_img4) {
+        fake_img4 = alloc_contig(0x2000);
+        memcpy(fake_img4, img4_data, img4_size);
+        seprom_fwload_async(fake_img4);
+    } else {
+        seprom_fwload_async(NULL);
+    }
+    for (int i = 0; i <= 0x100000 && number_of_change < 10; i++)
+    {
+        if (*watchdog != observed_value[number_of_change])
+        {
+            number_of_change++;
+            observed_value[number_of_change] = *watchdog;
+            changed_tick[number_of_change] = i;
+        }
+    }
+    event_wait_asserted(&sep_msg_event);
+    iprintf("number_of_change=%i\n", number_of_change);
+    for (int i = 0; i <= number_of_change; i++)
+    {
+        iprintf("%dth observed_value=%llx, at tick=%d\n", i, observed_value[i], changed_tick[i]);
+    }
+    if (use_fake_img4) {
+        free_contig(fake_img4, 0x2000);
+    }
+}
+
 static struct sep_command command_table[] = {
     SEP_COMMAND("help", "show usage", sep_help),
     SEP_COMMAND("auto", "automatically decide what to do", sep_auto),
@@ -1202,6 +1315,7 @@ static struct sep_command command_table[] = {
     SEP_COMMAND("poke", "write a 32 bit value", sep_pwned_poke),
     SEP_COMMAND("jump", "jump to address", sep_pwned_jump),
     SEP_COMMAND("boot", "boot pwned tz0 image", sep_pwned_boot),
+    SEP_COMMAND("observe", "observe how sep works", sep_observe),
 #endif
     SEP_COMMAND("encrypt", "encrypt a kbag (requires pwned SEPROM)", sep_aes_encrypt),
     SEP_COMMAND("decrypt", "decrypt a kbag (requires pwned SEPROM)", sep_aes_decrypt),
