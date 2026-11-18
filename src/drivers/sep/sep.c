@@ -88,7 +88,7 @@ static volatile struct mailbox_registers64 * mailboxregs64;
 static int is_sep64 = 0;
 struct event sep_msg_event, sep_rand_event, sep_boot_event, sep_load_event, sep_panic_event, sep_done_tz0_event, sep_done_integrity_tree_event;
 volatile uint32_t rnd_val;
-volatile uint32_t sep_has_loaded, sep_has_booted, sep_has_panicked, sep_has_done_tz0, seprom_has_left_to_sepos;
+volatile uint32_t sep_has_loaded, sep_has_booted, sep_has_panicked, sep_has_done_tz0, seprom_has_left_to_sepos, seprom_has_accepted_art;
 
 static const uint8_t img4_data[] = {
     // Outer SEQUENCE: IMG4
@@ -231,11 +231,15 @@ void sep_handle_msg_from_seprom(union sep_message_u msg) {
         event_fire(&sep_load_event);
     } else if (msg.msg.opcode == (6 + 100)) {
         seprom_has_left_to_sepos = true;
+    } else if (msg.msg.opcode == (7 + 100) /* 0x6B */) {
+        seprom_has_accepted_art = true;
     } else if (msg.msg.opcode == 0xd2) {
         sep_has_done_tz0 = true;
         event_fire(&sep_done_tz0_event);
     } else if (msg.msg.opcode == (17 + 100)) {
         event_fire(&sep_done_integrity_tree_event);
+    } else {
+        iprintf("got seprom message %x\n", msg.msg.opcode);
     }
 }
 
@@ -1260,9 +1264,10 @@ void sep_observe(const char *cmd, char *args)
     }
     iprintf("finished writing key pinning area\n");
     // event_wait_asserted(&sep_done_tz0_event);
+    iprintf("seprom booted tz0: %d\n", sep_has_done_tz0);
     seprom_ping();
     seprom_artload();
-    iprintf("loaded art\n");
+    iprintf("seprom loaded art: %d\n", seprom_has_accepted_art);
     volatile uint64_t *watchdog;
     watchdog = (volatile uint64_t *)tz0_base + 4; // offset 0x20
     uint64_t observed_value[10] = {};
@@ -1288,7 +1293,8 @@ void sep_observe(const char *cmd, char *args)
         }
     }
     event_wait_asserted(&sep_msg_event);
-    iprintf("number_of_change=%i\n", number_of_change);
+    iprintf("sepos booted: %d\n", seprom_has_left_to_sepos);
+    iprintf("number_of_change = %i\n", number_of_change);
     for (int i = 0; i <= number_of_change; i++)
     {
         iprintf("%dth observed_value=%llx, at tick=%d\n", i, observed_value[i], changed_tick[i]);
