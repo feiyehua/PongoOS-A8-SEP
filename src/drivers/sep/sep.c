@@ -1248,26 +1248,35 @@ void sep_observe(const char *cmd, char *args)
     }
     map_range(0xc00000000, tz0_base, tz0_size, 3, 2, true);
     tz0_base = 0xc00000000;
+    cache_clean_and_invalidate((void *)tz0_base, (size_t)tz0_size);
+    if (socnum >= 0x8000) {
+        iprintf("performing tz blackbird and tz lockdown\n");
+        tz_blackbird();
+        tz_lockdown();
+    }
     iprintf("start to boot tz0\n");
     seprom_boot_tz0_async();
 
     // key pinning hax
     if (!disable_key_pinning) {
         for (int x = 0; x<10000; x++) {
-            *(volatile uint64_t*)((char *)tz0_base+0xBFF000+0x18) = 0;
-            *(volatile uint64_t*)((char *)tz0_base+0xBFF000+0x20) = 0;
-            *(volatile uint64_t*)((char *)tz0_base+0xBFF000+0x28) = 0;
-            *(volatile uint64_t*)((char *)tz0_base+0xBFF000+0x48) = 0;
-            *(volatile uint64_t*)((char *)tz0_base+0xBFF000+0x50) = 0;
-            *(volatile uint64_t*)((char *)tz0_base+0xBFF000+0x58) = 0;
+            *(volatile uint64_t*)((char *)tz0_base + tz0_size - 0x1000 + 0x18) = 0;
+            *(volatile uint64_t*)((char *)tz0_base + tz0_size - 0x1000 + 0x20) = 0;
+            *(volatile uint64_t*)((char *)tz0_base + tz0_size - 0x1000 + 0x28) = 0;
+            *(volatile uint64_t*)((char *)tz0_base + tz0_size - 0x1000 + 0x48) = 0;
+            *(volatile uint64_t*)((char *)tz0_base + tz0_size - 0x1000 + 0x50) = 0;
+            *(volatile uint64_t*)((char *)tz0_base + tz0_size - 0x1000 + 0x58) = 0;
         }   
     }
     iprintf("finished writing key pinning area\n");
     // event_wait_asserted(&sep_done_tz0_event);
     iprintf("seprom booted tz0: %d\n", sep_has_done_tz0);
     seprom_ping();
-    seprom_artload();
-    iprintf("seprom loaded art: %d\n", seprom_has_accepted_art);
+    if (socnum < 0x8000) {
+        // On A8/A8X, we need to load art to sep
+        seprom_artload();
+        iprintf("seprom loaded art: %d\n", seprom_has_accepted_art);
+    }
     volatile uint64_t *watchdog;
     watchdog = (volatile uint64_t *)tz0_base + 4; // offset 0x20
     uint64_t observed_value[10] = {};
@@ -1283,8 +1292,13 @@ void sep_observe(const char *cmd, char *args)
     } else {
         seprom_fwload_async(NULL);
     }
-    for (int i = 0; i <= 0x100000 && number_of_change < 10; i++)
+    for (int i = 0; i <= 0x400000 && number_of_change < 10; i++)
     {
+        __asm__ volatile(
+            "dmb sy\n"
+            "isb\n"
+            ::: "memory"
+        );
         if (*watchdog != observed_value[number_of_change])
         {
             number_of_change++;
