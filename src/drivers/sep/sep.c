@@ -1387,12 +1387,37 @@ void sep_shc(const char *cmd, char *args)
     }
     void *fake_img4 = NULL;
     fake_img4 = alloc_contig(0x200000);
-    memcpy(fake_img4, sep_send_ab_bin, sep_send_ab_bin_len);
     memset((void *)fake_img4, 0, 0x200000);
+    memcpy(fake_img4, sep_send_ab_bin, sep_send_ab_bin_len);
     memset((void *)tz0_base, 0, 0x4000);
     cache_clean_and_invalidate((void *)fake_img4, (size_t)0x200000);
     cache_clean_and_invalidate((void *)tz0_base, (size_t)tz0_size);
+
+    // Watchdog
+    volatile uint64_t *watchdog;
+    watchdog = (volatile uint64_t *)tz0_base + 4; // offset 0x20
+    uint64_t observed_value[10] = {};
+    int changed_tick[10] = {};
+    int number_of_change = 0;
+    observed_value[number_of_change] = *watchdog;
+    changed_tick[number_of_change] = 0;
+    // Kick off SEPOS loading
     seprom_fwload_async(fake_img4);
+    // Overwrite the original img4 with the captured shellcode to replay it
+    // It must be performed before SEPROM calculates the digest of the img4p
+    for (int i = 0; i <= 0x400000 && number_of_change < 10; i++)
+    {
+        __asm__ volatile("dmb sy\n"
+                         "isb\n" ::
+                             : "memory");
+        if (*watchdog != observed_value[number_of_change])
+        {
+            number_of_change++;
+            observed_value[number_of_change] = *watchdog;
+            changed_tick[number_of_change] = i;
+        }
+    }
+
     enable_interrupts();
     sleep(1);
     __asm__ volatile("dmb sy\n"
@@ -1403,6 +1428,14 @@ void sep_shc(const char *cmd, char *args)
         iprintf("0x%llx\n", *(volatile uint64_t *)(tz0_base + i * 8));
     }
     free_contig(fake_img4, 0x200000);
+
+    // Print diagnostic information
+    iprintf("number_of_change = %i\n", number_of_change);
+    for (int i = 0; i <= number_of_change; i++)
+    {
+        iprintf("%dth observed_value=%llx, at tick=%d\n", i, observed_value[i],
+                changed_tick[i]);
+    }
 }
 
 // Observe how SEPROM performs SEPOS startup
