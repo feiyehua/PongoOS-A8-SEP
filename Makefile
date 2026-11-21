@@ -113,7 +113,7 @@ endif
 
 # Pongo options
 PONGO_LD_FLAGS              ?= -static -L$(LIB)/fixup -lc -Wl,-preload -Wl,-no_uuid -Wl,-e,start -Wl,-order_file,$(SRC)/sym_order.txt -Wl,-image_base,0x100000000 -Wl,-merge_zero_fill_sections -Wl,-sectalign,__DATA,__zerofill,0x8 -Wl,-segalign,0x4000 $(PONGO_LDFLAGS)
-PONGO_CC_FLAGS              ?= -Os -moutline -DPONGO_VERSION='"$(PONGO_VERSION)"' -DPONGO_BUILD='"$(PONGO_BUILD)"' -DPONGO_PRIVATE=1 -I$(SRC)/lib -I$(INC) -Iapple-include -I$(SRC)/kernel -I$(SRC)/drivers $(PONGO_LD_FLAGS) $(PONGO_CFLAGS)
+PONGO_CC_FLAGS              ?= -O3 -moutline -DPONGO_VERSION='"$(PONGO_VERSION)"' -DPONGO_BUILD='"$(PONGO_BUILD)"' -DPONGO_PRIVATE=1 -I$(SRC)/lib -I$(INC) -Iapple-include -I$(SRC)/kernel -I$(SRC)/drivers $(PONGO_LD_FLAGS) $(PONGO_CFLAGS)
 
 # KPF options
 KPF_LD_FLAGS                ?= -Wl,-kext $(KPF_LDFLAGS)
@@ -126,7 +126,7 @@ KPF_H                       := $(wildcard $(RA1N)/*.h)
 KPF_C                       := $(wildcard $(RA1N)/*.c) $(wildcard $(RA1N)/*.S)
 
 
-.PHONY: all always clean distclean
+.PHONY: all always clangd clean distclean
 
 # Preserve all dependencies, and rebuild if they're missing
 .NOTINTERMEDIATE:
@@ -145,6 +145,11 @@ $(BUILD)/checkra1n-kpf-pongo: Makefile $(KPF_C) $(KPF_H) $(PONGO_H) $(LIB)/fixup
 
 $(BUILD)/vmacho: Makefile $(AUX)/vmacho.c | $(BUILD)
 	$(CC) -Wall -O3 -o $@ $(AUX)/vmacho.c $(CFLAGS)
+
+clangd:
+	python3 $(AUX)/clangd_compdb.py \
+		$(filter %.c,$(PONGO_C)) -- $(EMBEDDED_CC) $(EMBEDDED_CC_FLAGS) $(PONGO_CC_FLAGS) \
+		-- $(AUX)/vmacho.c -- $(CC) -Wall -O3 $(CFLAGS)
 
 $(BUILD):
 	mkdir -p $@
