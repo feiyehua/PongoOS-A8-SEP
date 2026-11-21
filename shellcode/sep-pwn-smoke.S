@@ -27,11 +27,30 @@ _start:
     bl      sep_recv
     ubfx    r2, r0, #16, #8    @ get opcode
     cmp     r2, #0xC0
-    bne     .Ldone
+    beq     .Lpeek
+    cmp     r2, #0xC1          @ opcode 0xC1 recieve poke location
+    beq     .Lpoke
+    cmp     r2, #0xC3          @ opcode 0xC3 recieve branch location to r1
+    beq     .Lbranch
+    b       .Ldone
+.Lpeek:
     ldr     r0, [r1]
     movw    r1, #0x00ff
     movt    r1, #0x00ac              @ r1 = 0x00AC00FF
     bl      sep_send
+    b       .Ldone
+.Lpoke:
+    mov     r3, r1             @ poke location 
+.Lrecv_next:
+    bl      sep_recv
+    ubfx    r2, r0, #16, #8    @ get opcode
+    cmp     r2, #0xC2          @ opcode 0xC2 recieve poke data to r1
+    bne     .Lrecv_next
+    str     r1, [r3]
+    b       .Ldone
+.Lbranch:
+    blx      r1
+
     b       .Ldone
 .size _start, . - _start
 
